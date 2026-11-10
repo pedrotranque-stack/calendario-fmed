@@ -1,0 +1,55 @@
+{
+  "titulo": "Horario",
+  "subtitulo": "",
+  "zona_horaria": "Europe/Madrid",
+  "desde": "auto",
+  "meses": 6,
+  "fin_de_semana": false,
+  "calendarios": [
+    {
+      "clave": "c0c4603",
+      "nombre": "Aprendizaje y evolución",
+      "tipo": "asignatura",
+      "detalle": "completo",
+      "activo": true,
+      "palabras": "Aprendizaje y evolución",
+      "color": "#8CBD18"
+    },
+    {
+      "clave": "c58dcf4",
+      "nombre": "Ciclo Vital",
+      "tipo": "asignatura",
+      "detalle": "completo",
+      "activo": true,
+      "palabras": "Ciclo Vital",
+      "color": "#B4A0FF"
+    },
+    {
+      "clave": "ca3742b",
+      "nombre": "HPD",
+      "tipo": "asignatura",
+      "detalle": "completo",
+      "activo": true,
+      "palabras": "HPD",
+      "color": "#4FA3E0"
+    },
+    {
+      "clave": "c59074b",
+      "nombre": "Prácticas",
+      "tipo": "asignatura",
+      "detalle": "completo",
+      "activo": true,
+      "palabras": "Prácticas",
+      "color": "#FFC000"
+    },
+    {
+      "clave": "ca34817",
+      "nombre": "Biología y Conducta",
+      "tipo": "asignatura",
+      "detalle": "completo",
+      "activo": true,
+      "palabras": "Biología y Conducta",
+      "color": "#A0A0A0"
+    }
+  ]
+}

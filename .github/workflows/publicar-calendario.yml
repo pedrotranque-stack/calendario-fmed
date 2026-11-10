@@ -1,0 +1,70 @@
+# Generado por calendario.py: descarga los calendarios de Outlook y publica la página.
+name: Publicar calendario
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "7,27,47 * * * *"     # cada 20 minutos
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: publicar-calendario
+  cancel-in-progress: false
+jobs:
+  generar:
+    runs-on: ubuntu-latest
+    outputs:
+      cambiado: ${{ steps.generar.outputs.cambiado }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests python-dateutil
+      - name: Recuperar la última copia de los calendarios
+        uses: actions/cache/restore@v5
+        with:
+          path: cache_calendarios
+          key: calendarios-${{ github.run_id }}
+          restore-keys: calendarios-
+      - name: Generar la página
+        id: generar
+        env:
+          CALENDARIOS_ICS: ${{ secrets.CALENDARIOS_ICS }}
+        run: python calendario.py --ci
+      - name: Guardar la copia de los calendarios
+        if: steps.generar.outputs.cambiado == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: cache_calendarios
+          key: calendarios-${{ github.run_id }}
+      - name: Preparar la web
+        if: steps.generar.outputs.cambiado == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - name: Mantener activa la tarea programada
+        if: github.event_name == 'schedule'
+        run: |
+          ultimo=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - ultimo )) -gt 3888000 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u > .mantener_activo
+            git add .mantener_activo
+            git commit -m "Mantener activa la tarea programada"
+            git push
+          fi
+  publicar:
+    needs: generar
+    if: needs.generar.outputs.cambiado == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.despliegue.outputs.page_url }}
+    steps:
+      - id: despliegue
+        uses: actions/deploy-pages@v5

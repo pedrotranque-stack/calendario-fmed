@@ -1,0 +1,4 @@
+cache_calendarios/
+_site/
+__pycache__/
+calendarios_config.json
