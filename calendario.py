@@ -56,7 +56,7 @@ try:
 except Exception:
     pass
 
-VERSION = "2.0"
+VERSION = "2.1"
 DIR_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DEFECTO = os.path.join(DIR_SCRIPT, "calendarios_config.json")   # local: incluye las direcciones
 CONFIG_PUBLICA = os.path.join(DIR_SCRIPT, "calendarios.json")          # en GitHub: sin direcciones
@@ -730,18 +730,37 @@ def generar_local(cfg):
     return ruta
 
 
+def leer_secreto(crudo):
+    """Admite el formato JSON del menú aunque lleve caracteres invisibles o texto alrededor."""
+    limpio = crudo.replace("\ufeff", "").replace("\u200b", "").strip()
+    i, j = limpio.find("{"), limpio.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            datos = json.loads(limpio[i:j + 1])
+            if isinstance(datos, dict):
+                return {str(k): str(v).strip() for k, v in datos.items() if str(v).strip()}
+        except json.JSONDecodeError:
+            pass
+    datos = {}                                   # alternativa: una línea "clave: url" por calendario
+    for m in re.finditer(r'"?([A-Za-z0-9_-]+)"?\s*[:=]\s*"?((?:https?|webcal)://[^"\s,]+)', limpio):
+        datos[m.group(1)] = m.group(2)
+    return datos
+
+
 def modo_ci():
     """Lo ejecuta la tarea programada de GitHub."""
     if not os.path.exists(CONFIG_PUBLICA):
         sys.exit(f"No se encuentra {os.path.basename(CONFIG_PUBLICA)} en el repositorio.")
     cfg = cargar_config(CONFIG_PUBLICA)
-    crudo = os.environ.get(SECRETO, "").strip()
-    if not crudo:
+    crudo = os.environ.get(SECRETO, "")
+    if not crudo.strip():
         sys.exit(f"Falta el secreto {SECRETO} (Settings > Secrets and variables > Actions).")
-    try:
-        direcciones = json.loads(crudo)
-    except json.JSONDecodeError:
-        sys.exit(f"El secreto {SECRETO} no tiene el formato correcto: vuelve a copiarlo desde el menú del PC.")
+    direcciones = leer_secreto(crudo)
+    if not direcciones:
+        limpio = crudo.replace("\ufeff", "").strip()
+        sys.exit(f"El secreto {SECRETO} no tiene el formato correcto ({len(limpio)} caracteres; "
+                 f"{'empieza' if limpio.startswith('{') else 'no empieza'} por '{{'). "
+                 "Vuelve a copiarlo con la opción 'Volver a pegar el secreto' del menú del PC.")
     datos, leidos, ahora = recoger(cfg, direcciones)
     if not leidos:
         sys.exit("ERROR: no se pudo leer ningún calendario; no se publica nada.")
@@ -910,9 +929,17 @@ def _mostrar(cfg):
 
 def _anadir(cfg):
     print("\nPega la dirección ICS del calendario publicado en Outlook (o la ruta a un archivo .ics)")
-    origen = _preguntar("Dirección")
+    origen = _preguntar("Dirección").strip().strip('"').strip("'")
     if not origen:
         return
+    if "github.com" in origen.lower() or "github.io" in origen.lower():
+        print("  Esa es una dirección de GitHub. Aquí va el vínculo ICS del calendario de Outlook:\n"
+              "  Outlook > Configuración > Calendario > Calendarios compartidos > Publicar un calendario >\n"
+              "  'Puede ver todos los detalles' > Publicar > copiar el vínculo ICS.\n"
+              "  La dirección de GitHub se pide en la opción 3 del menú (Publicar en GitHub).")
+        return
+    if re.match(r"^[\w.-]+\.[a-z]{2,}/", origen, re.I) and not os.path.exists(origen):
+        origen = "https://" + origen            # pegada sin https://
     print("  Comprobando...")
     nombre_ics = ""
     try:
@@ -1179,7 +1206,7 @@ def _web_de(url):
 def _copiar_portapapeles(texto):
     try:
         if sys.platform.startswith("win"):
-            subprocess.run(["clip"], input=texto.encode("utf-16"), check=True, creationflags=SIN_VENTANA)
+            subprocess.run(["clip"], input=texto.encode("ascii", "ignore"), check=True, creationflags=SIN_VENTANA)
             return True
         for cmd in (["pbcopy"], ["xclip", "-selection", "clipboard"]):
             if shutil.which(cmd[0]):
@@ -1206,7 +1233,7 @@ def _config_publica(cfg):
 
 def _secreto(cfg):
     return json.dumps({c["clave"]: c["origen"] for c in cfg["calendarios"]
-                       if c.get("activo", True) and c.get("origen")}, indent=1)
+                       if c.get("activo", True) and c.get("origen")}, ensure_ascii=True)
 
 
 def _esperar(texto="Pulsa Intro cuando lo hayas hecho"):
@@ -1214,6 +1241,30 @@ def _esperar(texto="Pulsa Intro cuando lo hayas hecho"):
         input(f"\n  >> {texto}... ")
     except EOFError:
         pass
+
+
+def volver_a_pegar_secreto(ruta_cfg):
+    cfg = cargar_config(ruta_cfg)
+    gh = (cfg or {}).get("github") or {}
+    if not gh.get("repositorio"):
+        print("La publicación en GitHub no está preparada todavía: usa primero 'Publicar en GitHub'.")
+        return False
+    usuario, repo = _partes_repo(gh["repositorio"])
+    secreto = _secreto(cfg)
+    if _copiar_portapapeles(secreto):
+        print("Las direcciones de los calendarios están copiadas en el portapapeles.")
+    else:
+        print("No se pudo usar el portapapeles: copia este texto (es privado):\n\n" + secreto + "\n")
+    print(f"En la página que se abre: Value = borrar todo, pegar (Ctrl+V) y pulsar 'Update secret'.")
+    print(f"(Si dice que no existe: Settings > Secrets and variables > Actions > New repository secret,\n"
+          f" Name = {SECRETO}, Secret = pegar, Add secret.)")
+    _abrir_web(f"https://github.com/{usuario}/{repo}/settings/secrets/actions/{SECRETO}")
+    _esperar("Pulsa Intro cuando lo hayas guardado")
+    gh["secreto"] = hashlib.sha256(secreto.encode()).hexdigest()[:16]
+    guardar_config(cfg, ruta_cfg)
+    print(f"\nAhora, en GitHub: Actions > la ejecución fallida > 'Re-run jobs' (o espera a la próxima comprobación).")
+    print(f"  https://github.com/{usuario}/{repo}/actions")
+    return True
 
 
 def publicar(ruta_cfg, rehacer=False):
@@ -1367,6 +1418,7 @@ def main():
     ap.add_argument("--publicar", action="store_true", help="enviar la configuración a GitHub")
     ap.add_argument("--rehacer-github", action="store_true", help="volver a preparar la publicación desde cero")
     ap.add_argument("--paleta", action="store_true", help="ver la paleta de colores")
+    ap.add_argument("--secreto", action="store_true", help="volver a copiar el secreto con las direcciones")
     ap.add_argument("--abrir", action="store_true", help="abrir la vista previa al terminar")
     ap.add_argument("--abrir-web", action="store_true", help="abrir la página publicada")
     ap.add_argument("--ci", action="store_true", help="modo GitHub Actions")
@@ -1378,6 +1430,8 @@ def main():
         return modo_ci()
     if args.paleta:
         return mostrar_paleta()
+    if args.secreto:
+        return volver_a_pegar_secreto(args.config)
     if args.abrir_web:
         cfg = cargar_config(args.config) or {}
         web = (cfg.get("github") or {}).get("web")
@@ -1411,6 +1465,8 @@ PLANTILLA = r'''<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="only light">
+<meta name="theme-color" content="#FFFFFF">
 <meta name="generator" content="calendario.py __VERSION__">
 <title>__TITULO__</title>
 <style>
@@ -1422,16 +1478,8 @@ PLANTILLA = r'''<!DOCTYPE html>
   --font:"Segoe UI","Segoe UI Web (West European)",-apple-system,BlinkMacSystemFont,Roboto,"Helvetica Neue",Arial,sans-serif;
   --hora:56px;
   /* layout: barra superior · panel lateral (mini calendario + mis calendarios) · vista Semana/Mes/Agenda */
-  color-scheme:light;
+  color-scheme:only light;   /* siempre fondo claro, aunque el móvil esté en modo oscuro */
 }
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#1B1A19; --surface:#252423; --line:#3B3A39; --line-strong:#4F4E4D;
-  --text:#F3F2F1; --muted:#ADADAD; --brand:#479EF5; --brand-soft:#1F3349;
-  --exam:#F1707B; --holiday:#2D2C2B; color-scheme:dark}}
-:root[data-theme="dark"]{
-  --bg:#1B1A19; --surface:#252423; --line:#3B3A39; --line-strong:#4F4E4D;
-  --text:#F3F2F1; --muted:#ADADAD; --brand:#479EF5; --brand-soft:#1F3349;
-  --exam:#F1707B; --holiday:#2D2C2B; color-scheme:dark}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.35 var(--font);-webkit-text-size-adjust:100%}
@@ -1448,6 +1496,15 @@ button{font:inherit;color:inherit}
 .btn:hover{background:var(--brand-soft)}
 .btn.ico{padding:5px 9px;font-size:16px;line-height:1}
 .btn:disabled{opacity:.4;cursor:default;background:var(--surface)}
+.pasos{display:inline-flex;gap:6px}
+.flecha{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:6px;background:var(--brand);color:#fff;
+  font-weight:600;padding:0 14px 0 10px;min-height:38px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.flecha.der{padding:0 10px 0 14px}
+.flecha svg{width:20px;height:20px;flex:none}
+.flecha:hover{background:#0C5AA0}
+.flecha:active{transform:translateY(1px)}
+.flecha:disabled{background:#C8C6C4;box-shadow:none;cursor:default}
+body[data-vista="agenda"] .pasos{display:none}
 .vistas{display:inline-flex;border:1px solid var(--line-strong);border-radius:4px;overflow:hidden}
 .vistas button{border:0;background:var(--surface);padding:5px 12px;cursor:pointer;min-height:30px}
 .vistas button+button{border-left:1px solid var(--line-strong)}
@@ -1494,7 +1551,7 @@ main{overflow:auto;background:var(--surface)}
 .avisos{font-size:12px;color:var(--exam);line-height:1.45}
 
 /* Semana */
-.semana{min-width:640px}
+.semana{min-width:0}
 .cabdias,.todo-dia,.cuerpo{display:grid;grid-template-columns:56px repeat(var(--n),minmax(0,1fr))}
 .cabdias{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
 .cabdia{padding:8px 8px 6px;border-left:1px solid var(--line)}
@@ -1574,17 +1631,44 @@ main{overflow:auto;background:var(--surface)}
 .tarjeta dd{margin:0}
 
 .tabs{display:none}
-@media (max-width:760px){
+/* Pantallas estrechas o bajas (tablet, móvil en horizontal): el panel de calendarios se pliega
+   bajo el botón «Calendarios» y la semana ocupa todo el ancho, de lunes a viernes */
+@media (max-width:1000px),(max-height:560px){
   .app{grid-template-columns:1fr;height:auto}
   main{overflow:visible}
   aside{display:none;border-right:0;border-bottom:1px solid var(--line)}
-  body.ver-panel aside{display:flex}
-  .filtros-btn{display:inline-block;margin-left:auto}
+  body.ver-panel aside{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px 28px}
+  .filtros-btn{display:inline-block}
+  .semana,.mes{min-width:0}
+  .cabdias,.todo-dia,.cuerpo{grid-template-columns:44px repeat(var(--n),minmax(0,1fr))}
+  .cabdia{padding:6px 6px 4px}
+  .ev{padding:2px 4px 2px 6px}
+}
+@media (max-height:560px) and (orientation:landscape){
+  .top{padding:6px 12px}
+  .marca p{display:none}
+  .marca h1{font-size:15px}
+  .flecha .txt{display:none}
+  .flecha,.flecha.der{padding:0;width:48px;min-height:38px;justify-content:center}
+  .flecha svg{width:24px;height:24px}
+  .rango{font-size:15px}
+  .cabdia{display:flex;align-items:baseline;gap:6px}
+  .cabdia .num{font-size:18px}
+  .rango{min-width:0}
+}
+/* Móvil en vertical: un día cada vez, con pestañas L–V */
+@media (max-width:760px) and (orientation:portrait){
   .nav{margin-left:0;width:100%}
   .rango{min-width:0;width:100%;order:-1;font-size:16px}
   .chip{order:-1}
-  .semana,.mes{min-width:0}
-  body[data-vista="semana"] .tabs{display:grid;grid-template-columns:repeat(var(--n),1fr);gap:4px;padding:8px 12px;background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:6}
+  .filtros-btn{margin-left:auto}
+  .flecha .txt{display:none}
+  .flecha,.flecha.der{padding:0;width:46px;min-height:40px;justify-content:center}
+  .flecha svg{width:24px;height:24px}
+  body[data-vista="semana"] .tabs{display:grid;grid-template-columns:44px repeat(var(--n),1fr) 44px;gap:4px;padding:8px 8px;background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:6}
+  .tabs .flecha,.tabs .flecha:hover{background:var(--brand);color:#fff;width:44px;min-height:44px;align-self:center;border-radius:8px;display:inline-flex;justify-content:center;padding:0}
+  .tabs .flecha:disabled{background:#C8C6C4}
+  body[data-vista="semana"] .top .pasos{display:none}   /* en Semana las flechas van junto a los días */
   .tabs button{border:0;background:none;border-radius:6px;padding:4px 0;cursor:pointer}
   .tabs .d{display:block;font-size:11px;color:var(--muted)}
   .tabs .n{display:block;font-size:18px;font-weight:300}
@@ -1592,6 +1676,7 @@ main{overflow:auto;background:var(--surface)}
   .tabs button[aria-pressed="true"] .d{color:#fff}
   .tabs button.hoy:not([aria-pressed="true"]) .n{color:var(--brand);font-weight:600}
   .semana .cabdias{display:none}
+  .cabdias,.todo-dia,.cuerpo{grid-template-columns:56px repeat(var(--n),minmax(0,1fr))}
   .semana{--n:1!important}
   .semana .col:not(.activa),.semana .todo-dia .celda:not(.activa){display:none}
   .ev{font-size:13px}
@@ -1619,8 +1704,10 @@ main{overflow:auto;background:var(--surface)}
       <button data-vista="semana" aria-pressed="true">Semana</button><button data-vista="mes" aria-pressed="false">Mes</button><button data-vista="agenda" aria-pressed="false">Agenda</button>
     </div>
     <button class="btn" id="hoy">Hoy</button>
-    <button class="btn ico" id="ant" aria-label="Anterior">&#8249;</button>
-    <button class="btn ico" id="sig" aria-label="Siguiente">&#8250;</button>
+    <div class="pasos">
+      <button class="flecha izq" id="ant" aria-label="Semana anterior"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span class="txt">Semana anterior</span></button>
+      <button class="flecha der" id="sig" aria-label="Semana siguiente"><span class="txt">Semana siguiente</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+    </div>
     <span class="rango" id="rango"></span>
     <span class="chip" id="chip" hidden>Exámenes esta semana</span>
     <button class="btn filtros-btn" id="panel" aria-expanded="false">Calendarios</button>
@@ -1664,7 +1751,8 @@ const D = __DATOS__;
   const lunesDe=d=>masDias(d,-((d.getDay()+6)%7));
   const hnum=s=>{const t=s.slice(11,16).split(":").map(Number);return t[0]+t[1]/60};
   const hora=s=>s.slice(11,16);
-  const movil=()=>window.matchMedia("(max-width:760px)").matches;
+  const movil=()=>window.matchMedia("(max-width:760px) and (orientation:portrait)").matches;
+  const estrecho=()=>window.matchMedia("(max-width:1000px),(max-height:560px)").matches;
   const HOYD=new Date(), HOY=iso(HOYD);
   const R0=aFecha(D.rango[0]), R1=aFecha(D.rango[1]);
   const oscuro=hex=>{const n=parseInt(hex.slice(1),16);const f=.62;return "#"+[n>>16,n>>8&255,n&255].map(v=>Math.round(v*f).toString(16).padStart(2,"0")).join("")};
@@ -1759,8 +1847,10 @@ const D = __DATOS__;
     $("#rango").textContent=l.getMonth()===v.getMonth()?`${l.getDate()}–${v.getDate()} de ${mesTxt(v.getMonth())} de ${v.getFullYear()}`
       :`${l.getDate()} de ${mesTxt(l.getMonth())} – ${v.getDate()} de ${mesTxt(v.getMonth())}`+(l.getFullYear()!==v.getFullYear()?` de ${v.getFullYear()}`:"");
     $("#chip").hidden=!dias.some(d=>delDia(iso(d)).some(e=>e.tipo==="examen"));
-    $("#tabs").innerHTML=dias.map((d,i)=>`<button aria-pressed="${i===diaMovil}" class="${iso(d)===HOY?"hoy":""}" data-i="${i}"><span class="d">${DC[(d.getDay()+6)%7]}</span><span class="n">${d.getDate()}</span></button>`).join("");
-    $("#tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{diaMovil=+b.dataset.i;cursor=dias[diaMovil];pintar(true)});
+    const fl=(id,d)=>`<button class="flecha" data-paso="${id}" aria-label="Semana ${id==="ant"?"anterior":"siguiente"}"${$("#"+id).disabled?" disabled":""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg></button>`;
+    $("#tabs").innerHTML=fl("ant","M15 5l-7 7 7 7")+dias.map((d,i)=>`<button aria-pressed="${i===diaMovil}" class="${iso(d)===HOY?"hoy":""}" data-i="${i}"><span class="d">${DC[(d.getDay()+6)%7]}</span><span class="n">${d.getDate()}</span></button>`).join("")+fl("sig","M9 5l7 7-7 7");
+    $("#tabs").querySelectorAll("[data-paso]").forEach(b=>b.onclick=()=>$("#"+b.dataset.paso).click());
+    $("#tabs").querySelectorAll("button[data-i]").forEach(b=>b.onclick=()=>{diaMovil=+b.dataset.i;cursor=dias[diaMovil];pintar(true)});
     let h=`<div class="semana"><div class="cabdias"><div></div>`;
     dias.forEach(d=>h+=`<div class="cabdia${iso(d)===HOY?" hoy":""}"><div class="num">${d.getDate()}</div><div class="dia">${DIAS[(d.getDay()+6)%7]}</div></div>`);
     h+=`</div><div class="todo-dia"><div class="lbl">Todo el día</div>`;
@@ -1859,13 +1949,15 @@ const D = __DATOS__;
   $("#msig").onclick=()=>{miniMes=[miniMes[0],miniMes[1]+1];if(miniMes[1]>11)miniMes=[miniMes[0]+1,0];pintarMini()};
 
   // ── navegación ──
-  const mesTxt=m=>movil()?MESES[m].slice(0,3):MESES[m];
+  const mesTxt=m=>estrecho()?MESES[m].slice(0,3):MESES[m];
   function limitar(d){if(d<R0)d=new Date(R0);if(d>R1)d=new Date(R1);let w=(d.getDay()+6)%7;if(w>=N)d=masDias(d,7-w);if(d>R1)d=masDias(d,-7);return d}
   function pintar(desplazar){
     document.body.dataset.vista=vista;
     document.querySelectorAll(".vistas button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.vista===vista));
-    const ant=$("#ant"),sig=$("#sig");
-    if(vista==="semana"){pintarSemana();ant.disabled=lunesDe(cursor)<=R0;sig.disabled=masDias(lunesDe(cursor),7)>R1}
+    const ant=$("#ant"),sig=$("#sig"), u=vista==="mes"?["Mes anterior","Mes siguiente"]:["Semana anterior","Semana siguiente"];
+    ant.querySelector(".txt").textContent=u[0]; ant.setAttribute("aria-label",u[0]);
+    sig.querySelector(".txt").textContent=u[1]; sig.setAttribute("aria-label",u[1]);
+    if(vista==="semana"){ant.disabled=lunesDe(cursor)<=R0;sig.disabled=masDias(lunesDe(cursor),7)>R1;pintarSemana()}
     else if(vista==="mes"){pintarMes();ant.disabled=new Date(cursor.getFullYear(),cursor.getMonth(),1)<=R0;sig.disabled=new Date(cursor.getFullYear(),cursor.getMonth()+1,1)>R1}
     else{pintarAgenda();ant.disabled=sig.disabled=true}
     if(!miniMes||desplazar!==false) miniMes=[cursor.getFullYear(),cursor.getMonth()];
@@ -1879,6 +1971,8 @@ const D = __DATOS__;
   $("#ant").onclick=()=>{cursor=vista==="mes"?new Date(cursor.getFullYear(),cursor.getMonth()-1,1):masDias(lunesDe(cursor),-7);if(vista==="mes")cursor=limitar(cursor);diaMovil=0;pintar(true)};
   $("#sig").onclick=()=>{cursor=vista==="mes"?new Date(cursor.getFullYear(),cursor.getMonth()+1,1):masDias(lunesDe(cursor),7);if(vista==="mes")cursor=limitar(cursor);diaMovil=0;pintar(true)};
   $("#panel").onclick=()=>{const on=document.body.classList.toggle("ver-panel");$("#panel").setAttribute("aria-expanded",on)};
+  let girado, ancho=window.innerWidth;   // repintar solo al girar o cambiar el ancho (no al ocultarse la barra del navegador)
+  window.addEventListener("resize",()=>{if(window.innerWidth===ancho)return;ancho=window.innerWidth;clearTimeout(girado);girado=setTimeout(()=>pintar(false),150)});
   cursor=limitar(new Date(HOYD)); diaMovil=Math.min((cursor.getDay()+6)%7,N-1);
   pintar(true);
 })();
